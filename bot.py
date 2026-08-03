@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # Bot token from environment variables
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set!")
+
 # Store schedules (in production, use a database)
 user_schedules = {}
 
@@ -272,28 +275,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # Main function
-def main():
+async def main():
     """Start the bot."""
-    # Create Application
-    application = Application.builder().token(TOKEN).build()
+    # Create Application with better error handling
+    try:
+        application = Application.builder().token(TOKEN).build()
+        
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("schedule", schedule_command))
+        application.add_handler(CommandHandler("view", view_command))
+        application.add_handler(CommandHandler("today", today_command))
+        application.add_handler(CommandHandler("cancel", cancel_command))
+        
+        # Add callback query handler
+        application.add_handler(CallbackQueryHandler(button_callback))
+        
+        # Add message handler for scheduling
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("schedule", schedule_command))
-    application.add_handler(CommandHandler("view", view_command))
-    application.add_handler(CommandHandler("today", today_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
-    
-    # Add callback query handler
-    application.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Add message handler for scheduling
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Start the Bot
-    print("🤖 Bot is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Start the Bot
+        print("🤖 Bot is starting...")
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        
+        # Keep bot running
+        while True:
+            await asyncio.sleep(3600)
+            
+    except Exception as e:
+        logger.error(f"Error starting bot: {e}")
+        raise
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped by user.")
+    except Exception as e:
+        print(f"Bot failed with error: {e}")
