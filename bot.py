@@ -1,27 +1,38 @@
 import os
 import logging
+import sys
 from flask import Flask, request, jsonify
 import requests
+import json
 
-# Simple logging
-logging.basicConfig(level=logging.INFO)
+# Force flush logs
+sys.stdout.flush()
+
+# Setup logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Get bot token from environment
+# Get bot token
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN not set!")
-    exit(1)
+    sys.exit(1)
+
+logger.info(f"✅ Token found: {TOKEN[:10]}...")
 
 # Telegram API URL
 TELEGRAM_URL = f"https://api.telegram.org/bot{TOKEN}"
 
-# Store user data (in-memory)
+# Store user data
 user_data = {}
 
-# ---------- TELEGRAM API HELPERS ----------
+# ---------- TELEGRAM HELPERS ----------
 def send_message(chat_id, text, reply_markup=None):
     """Send a message to Telegram"""
     url = f"{TELEGRAM_URL}/sendMessage"
@@ -31,17 +42,18 @@ def send_message(chat_id, text, reply_markup=None):
         "parse_mode": "HTML"
     }
     if reply_markup:
-        payload["reply_markup"] = reply_markup
+        payload["reply_markup"] = json.dumps(reply_markup)
     
     try:
         response = requests.post(url, json=payload)
+        logger.info(f"📤 Sent message to {chat_id}: {response.status_code}")
         return response.json()
     except Exception as e:
-        logger.error(f"Error sending message: {e}")
+        logger.error(f"❌ Error sending message: {e}")
         return None
 
 def send_start_keyboard(chat_id):
-    """Send welcome message with keyboard"""
+    """Send welcome message"""
     keyboard = {
         "inline_keyboard": [
             [{"text": "📝 Schedule Event", "callback_data": "schedule"}],
@@ -51,158 +63,93 @@ def send_start_keyboard(chat_id):
     }
     text = (
         "👋 <b>Welcome to Scheduling Bot!</b>\n\n"
-        "I'll help you manage your schedule. Here's what I can do:\n\n"
+        "I'll help you manage your schedule.\n\n"
         "📝 Schedule new events\n"
         "📋 View all your events\n"
         "📅 See today's events\n\n"
-        "Just click a button below to get started!"
+        "Click a button below to get started!"
     )
     return send_message(chat_id, text, keyboard)
 
-def show_events(chat_id):
-    """Show all events for a user"""
-    events = user_data.get(chat_id, [])
-    if not events:
-        send_message(chat_id, "📭 You have no scheduled events.")
-        return
-    
-    text = "📅 <b>Your Scheduled Events:</b>\n\n"
-    for i, event in enumerate(events, 1):
-        text += f"{i}. <b>{event['title']}</b>\n"
-        text += f"   🕐 {event['datetime']}\n"
-        text += f"   📝 {event.get('description', 'No description')}\n\n"
-    
-    # Add cancel button
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "❌ Cancel Event", "callback_data": "cancel"}],
-            [{"text": "🔙 Back to Menu", "callback_data": "menu"}]
-        ]
-    }
-    send_message(chat_id, text, keyboard)
-
-def show_today_events(chat_id):
-    """Show today's events"""
-    from datetime import datetime
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    events = user_data.get(chat_id, [])
-    today_events = [e for e in events if e['datetime'].startswith(today)]
-    
-    if not today_events:
-        send_message(chat_id, f"📭 No events scheduled for today ({today}).")
-        return
-    
-    text = f"📅 <b>Today's Events ({today}):</b>\n\n"
-    for i, event in enumerate(today_events, 1):
-        time = event['datetime'].split()[1]
-        text += f"{i}. <b>{event['title']}</b> at {time}\n"
-    
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "🔙 Back to Menu", "callback_data": "menu"}]
-        ]
-    }
-    send_message(chat_id, text, keyboard)
-
 # ---------- PROCESS UPDATES ----------
 def process_update(update):
-    """Process incoming Telegram update"""
+    """Process incoming update"""
     try:
-        # Handle callback queries (button presses)
+        logger.info(f"📨 Processing update: {update}")
+        
+        # Handle callback queries
         if 'callback_query' in update:
             query = update['callback_query']
             chat_id = query['from']['id']
             data = query['data']
             
-            # Answer callback to remove loading state
+            # Answer callback
             requests.post(f"{TELEGRAM_URL}/answerCallbackQuery", json={
                 "callback_query_id": query['id']
             })
             
-            if data == "menu":
-                send_start_keyboard(chat_id)
-            
-            elif data == "schedule":
+            if data == "schedule":
                 send_message(chat_id, 
                     "📝 <b>Create New Event</b>\n\n"
-                    "Please send me the event details in this format:\n"
+                    "Send me the event details in this format:\n"
                     "<code>Title | YYYY-MM-DD HH:MM | Description</code>\n\n"
                     "Example:\n"
-                    "<code>Meeting | 2026-08-05 15:00 | Team sync</code>\n\n"
-                    "Or send <b>/cancel</b> to abort."
+                    "<code>Meeting | 2026-08-05 15:00 | Team sync</code>"
                 )
-                # Store state
                 user_data[f"{chat_id}_state"] = "awaiting_schedule"
             
             elif data == "view":
-                show_events(chat_id)
-            
-            elif data == "today":
-                show_today_events(chat_id)
-            
-            elif data == "cancel":
                 events = user_data.get(chat_id, [])
                 if not events:
-                    send_message(chat_id, "📭 No events to cancel.")
+                    send_message(chat_id, "📭 No scheduled events.")
                     return
                 
-                # Show events with cancel buttons
-                text = "❌ <b>Select event to cancel:</b>\n\n"
-                keyboard = {"inline_keyboard": []}
+                text = "📅 <b>Your Events:</b>\n\n"
                 for i, event in enumerate(events, 1):
-                    text += f"{i}. {event['title']} - {event['datetime']}\n"
-                    keyboard["inline_keyboard"].append([
-                        {"text": f"Cancel #{i}", "callback_data": f"cancel_{i-1}"}
-                    ])
-                keyboard["inline_keyboard"].append([
-                    {"text": "🔙 Back", "callback_data": "menu"}
-                ])
-                send_message(chat_id, text, keyboard)
+                    text += f"{i}. <b>{event['title']}</b>\n"
+                    text += f"   🕐 {event['datetime']}\n"
+                    text += f"   📝 {event.get('description', 'No description')}\n\n"
+                send_message(chat_id, text)
             
-            elif data.startswith("cancel_"):
-                try:
-                    idx = int(data.split("_")[1])
-                    events = user_data.get(chat_id, [])
-                    if 0 <= idx < len(events):
-                        removed = events.pop(idx)
-                        send_message(chat_id, f"✅ Cancelled: <b>{removed['title']}</b>")
-                        show_events(chat_id)
-                    else:
-                        send_message(chat_id, "❌ Event not found.")
-                except Exception as e:
-                    send_message(chat_id, "❌ Error cancelling event.")
+            elif data == "today":
+                from datetime import datetime
+                today = datetime.now().strftime("%Y-%m-%d")
+                events = user_data.get(chat_id, [])
+                today_events = [e for e in events if e['datetime'].startswith(today)]
+                
+                if not today_events:
+                    send_message(chat_id, f"📭 No events today ({today}).")
+                    return
+                
+                text = f"📅 <b>Today's Events ({today}):</b>\n\n"
+                for i, event in enumerate(today_events, 1):
+                    time = event['datetime'].split()[1]
+                    text += f"{i}. <b>{event['title']}</b> at {time}\n"
+                send_message(chat_id, text)
         
-        # Handle text messages
+        # Handle messages
         elif 'message' in update:
             message = update['message']
             chat_id = message['from']['id']
             text = message.get('text', '')
             
-            # Handle /start command
+            logger.info(f"💬 Message from {chat_id}: {text}")
+            
             if text == '/start':
                 send_start_keyboard(chat_id)
             
-            # Handle /cancel command
-            elif text == '/cancel':
-                user_data[f"{chat_id}_state"] = None
-                send_message(chat_id, "❌ Operation cancelled. Use /start to begin again.")
-            
-            # Handle scheduling input
             elif user_data.get(f"{chat_id}_state") == "awaiting_schedule":
                 try:
-                    # Parse input: Title | YYYY-MM-DD HH:MM | Description
                     parts = text.split('|')
                     if len(parts) >= 2:
                         title = parts[0].strip()
                         datetime_str = parts[1].strip()
                         description = parts[2].strip() if len(parts) >= 3 else "No description"
                         
-                        # Validate date format
+                        # Validate date
                         from datetime import datetime as dt
                         dt.strptime(datetime_str, "%Y-%m-%d %H:%M")
                         
-                        # Save event
                         if chat_id not in user_data:
                             user_data[chat_id] = []
                         user_data[chat_id].append({
@@ -216,54 +163,52 @@ def process_update(update):
                             f"✅ <b>Event Scheduled!</b>\n\n"
                             f"📌 {title}\n"
                             f"🕐 {datetime_str}\n"
-                            f"📝 {description}\n\n"
-                            f"Use /start to manage your events."
+                            f"📝 {description}"
                         )
                     else:
                         send_message(chat_id, 
-                            "❌ Invalid format.\n\n"
-                            "Please use:\n"
-                            "<code>Title | YYYY-MM-DD HH:MM | Description</code>\n\n"
-                            "Example:\n"
-                            "<code>Meeting | 2026-08-05 15:00 | Team sync</code>"
+                            "❌ Invalid format. Use:\n"
+                            "<code>Title | YYYY-MM-DD HH:MM | Description</code>"
                         )
                 except Exception as e:
-                    send_message(chat_id, 
-                        f"❌ Error: Invalid date format.\n\n"
-                        f"Please use: <code>YYYY-MM-DD HH:MM</code>\n"
-                        f"Example: <code>2026-08-05 15:00</code>"
-                    )
+                    send_message(chat_id, f"❌ Error: {str(e)}")
             
-            # Handle any other text
             else:
-                send_message(chat_id, 
-                    "👋 Use /start to see the menu and manage your schedule!"
-                )
+                send_message(chat_id, "👋 Send /start to begin!")
     
     except Exception as e:
-        logger.error(f"Error processing update: {e}")
+        logger.error(f"❌ Process error: {e}")
 
 # ---------- FLASK ROUTES ----------
 @app.route('/', methods=['GET'])
 def home():
-    return "✅ Bot is running! Send /start to your bot on Telegram."
+    return "✅ Bot is running!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         update = request.get_json()
+        logger.info(f"📨 Webhook received: {update}")
         if update:
-            logger.info(f"Received update: {update.get('message', {}).get('text', 'callback')}")
             process_update(update)
         return "OK", 200
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}")
         return "Error", 500
+
+@app.route('/test', methods=['GET'])
+def test():
+    """Test endpoint"""
+    return jsonify({
+        "status": "running",
+        "token_set": bool(TOKEN),
+        "domain": os.environ.get("RAILWAY_PUBLIC_DOMAIN", "Not set")
+    })
 
 @app.route('/setwebhook', methods=['GET'])
 def set_webhook():
-    """Manually set webhook"""
-    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    """Set webhook"""
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     if not domain:
         return "❌ RAILWAY_PUBLIC_DOMAIN not set", 400
     
@@ -272,17 +217,18 @@ def set_webhook():
     
     try:
         response = requests.get(url)
-        return f"Webhook set to: {webhook_url}\nResponse: {response.json()}", 200
+        logger.info(f"Webhook response: {response.json()}")
+        return jsonify(response.json()), 200
     except Exception as e:
         return f"Error: {e}", 500
 
 @app.route('/deletewebhook', methods=['GET'])
 def delete_webhook():
-    """Delete webhook (fallback to polling)"""
+    """Delete webhook"""
     url = f"{TELEGRAM_URL}/deleteWebhook"
     try:
         response = requests.get(url)
-        return f"Webhook deleted: {response.json()}", 200
+        return jsonify(response.json()), 200
     except Exception as e:
         return f"Error: {e}", 500
 
@@ -290,8 +236,11 @@ def delete_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     
-    # Set webhook on startup
-    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    logger.info("🚀 Starting bot...")
+    logger.info(f"📡 Port: {port}")
+    
+    # Set webhook
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     if domain:
         webhook_url = f"https://{domain}/webhook"
         url = f"{TELEGRAM_URL}/setWebhook?url={webhook_url}"
@@ -301,7 +250,14 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"❌ Failed to set webhook: {e}")
     else:
-        logger.warning("⚠️ No RAILWAY_PUBLIC_DOMAIN set. Using fallback...")
+        logger.warning("⚠️ RAILWAY_PUBLIC_DOMAIN not set!")
+        logger.warning("Please add it in Railway variables")
     
-    logger.info(f"🚀 Starting bot on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    # Test bot
+    try:
+        response = requests.get(f"{TELEGRAM_URL}/getMe")
+        logger.info(f"✅ Bot info: {response.json()}")
+    except Exception as e:
+        logger.error(f"❌ Cannot connect to Telegram: {e}")
+    
+    app.run(host='0.0.0.0', port=port, debug=False)
