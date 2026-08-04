@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import pytz
@@ -18,7 +19,10 @@ if not TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN not set!")
     exit(1)
 
-# Store schedules (in-memory)
+# Flask app
+app = Flask(__name__)
+
+# Store schedules
 user_schedules = {}
 TZ = pytz.timezone("Asia/Kolkata")
 
@@ -225,31 +229,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Scheduled!\n\n📌 {title}\n🕐 {dt.strftime('%B %d, %I:%M %p')}\n📝 {desc}"
         )
 
+# ---------- FLASK WEBHOOK ----------
+@app.route('/')
+def home():
+    return "Bot is running! ✅"
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        # Get the update from Telegram
+        update_data = request.get_json()
+        if update_data:
+            update = Update.de_json(update_data, application.bot)
+            application.process_update(update)
+        return 'OK', 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return 'Error', 500
+
 # ---------- MAIN ----------
-def main():
-    print("🤖 Starting bot...")
+if __name__ == '__main__':
+    print("🤖 Starting bot with webhook...")
     print(f"Token present: {'Yes' if TOKEN else 'No'}")
     
     # Build application
-    app = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).build()
     
     # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("schedule", schedule_command))
-    app.add_handler(CommandHandler("view", view_command))
-    app.add_handler(CommandHandler("today", today_command))
-    app.add_handler(CommandHandler("cancel", cancel_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("schedule", schedule_command))
+    application.add_handler(CommandHandler("view", view_command))
+    application.add_handler(CommandHandler("today", today_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Start bot with polling
-    print("✅ Bot is ready! Waiting for messages...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        raise
+    # Set webhook
+    webhook_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    if webhook_url:
+        webhook_url = f"https://{webhook_url}/webhook"
+        print(f"Webhook URL: {webhook_url}")
+        application.bot.set_webhook(webhook_url)
+        print("✅ Webhook set!")
+    else:
+        print("⚠️ No webhook URL. Running with polling...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Start Flask server
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
